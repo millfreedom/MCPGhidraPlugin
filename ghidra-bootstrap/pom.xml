@@ -1,0 +1,41 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>ua.millfreedom.ghidramcp</groupId>
+    <artifactId>MCPGhidraPlugin-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>ghidra-bootstrap</artifactId>
+  <packaging>pom</packaging>
+  <name>ghidra-bootstrap</name>
+
+  <build>
+    <plugins>
+      <plugin>
+        <artifactId>maven-antrun-plugin</artifactId>
+        <version>3.1.0</version>
+        <executions>
+          <execution>
+            <id>fetch-ghidra-from-github-release</id>
+            <phase>initialize</phase>
+            <goals>
+              <goal>run</goal>
+            </goals>
+            <configuration>
+              <target>
+                <mkdir dir="${ghidra.download.dir}"/>
+                <get src="${ghidra.release.url}" dest="${ghidra.release.zip}" skipexisting="true"/>
+                <unzip src="${ghidra.release.zip}" dest="${ghidra.download.dir}" overwrite="false"/>
+              </target>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+
+</project>

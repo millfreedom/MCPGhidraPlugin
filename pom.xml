@@ -1,0 +1,31 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>ua.millfreedom.ghidramcp</groupId>
+  <artifactId>MCPGhidraPlugin-parent</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+  <name>MCPGhidraPlugin-parent</name>
+
+  <modules>
+    <module>ghidra-bootstrap</module>
+    <module>mcp-ghidra-plugin</module>
+  </modules>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+    <ghidra.version>12.0.4</ghidra.version>
+    <ghidra.release.tag>Ghidra_${ghidra.version}_build</ghidra.release.tag>
+    <ghidra.release.date>20260303</ghidra.release.date>
+    <ghidra.dist.dir>ghidra_${ghidra.version}_PUBLIC</ghidra.dist.dir>
+    <ghidra.download.dir>${maven.multiModuleProjectDirectory}/target/ghidra</ghidra.download.dir>
+    <ghidra.release.asset>${ghidra.dist.dir}_${ghidra.release.date}.zip</ghidra.release.asset>
+    <ghidra.release.url>https://github.com/NationalSecurityAgency/ghidra/releases/download/${ghidra.release.tag}/${ghidra.release.asset}</ghidra.release.url>
+    <ghidra.release.zip>${ghidra.download.dir}/${ghidra.release.asset}</ghidra.release.zip>
+  </properties>
+
+</project>
