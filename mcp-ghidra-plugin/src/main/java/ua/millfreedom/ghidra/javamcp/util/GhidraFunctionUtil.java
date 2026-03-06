@@ -51,6 +51,14 @@ public final class GhidraFunctionUtil {
     }
 
     public static boolean setFunctionSignature(Function function, String signatureStr) {
+        return setFunctionSignature(function, signatureStr, null);
+    }
+
+    public static boolean setFunctionSignature(
+        Function function,
+        String signatureStr,
+        String explicitCallingConvention
+    ) {
         if (function == null || signatureStr == null || signatureStr.isBlank()) {
             return false;
         }
@@ -68,12 +76,20 @@ public final class GhidraFunctionUtil {
                 return false;
             }
 
+            String parsedCallingConvention = functionDef.getCallingConvention() != null
+                ? functionDef.getCallingConvention().getName()
+                : null;
+            String callingConvention = explicitCallingConvention != null && !explicitCallingConvention.isBlank()
+                ? explicitCallingConvention.trim()
+                : parsedCallingConvention;
+            if (callingConvention != null && !callingConvention.isBlank()) {
+                if (!applyCallingConvention(function, callingConvention)) {
+                    return false;
+                }
+            }
+
             SourceType sourceType = SourceType.USER_DEFINED;
             function.setReturnType(functionDef.getReturnType(), sourceType);
-
-            if (functionDef.getCallingConvention() != null) {
-                function.setCallingConvention(functionDef.getCallingConvention().getName());
-            }
 
             while (function.getParameterCount() > 0) {
                 function.removeParameter(0);
@@ -91,6 +107,27 @@ public final class GhidraFunctionUtil {
             return true;
         } catch (Exception e) {
             Msg.error(GhidraFunctionUtil.class, "Failed to set function signature", e);
+            return false;
+        }
+    }
+
+    public static boolean setFunctionCallingConvention(Function function, String callingConvention) {
+        if (function == null || callingConvention == null || callingConvention.isBlank()) {
+            return false;
+        }
+        return applyCallingConvention(function, callingConvention.trim());
+    }
+
+    private static boolean applyCallingConvention(Function function, String callingConvention) {
+        try {
+            function.setCallingConvention(callingConvention);
+            return true;
+        } catch (Exception e) {
+            Msg.error(
+                GhidraFunctionUtil.class,
+                "Failed to set function calling convention: " + callingConvention,
+                e
+            );
             return false;
         }
     }

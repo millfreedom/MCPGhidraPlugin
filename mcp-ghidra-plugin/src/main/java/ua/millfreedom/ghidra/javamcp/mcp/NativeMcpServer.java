@@ -29,6 +29,7 @@ import ghidra.program.model.listing.GhidraClass;
 import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.InstructionIterator;
 import ghidra.program.model.listing.Program;
+import ghidra.program.model.lang.PrototypeModel;
 import ghidra.program.model.symbol.Namespace;
 import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceManager;
@@ -130,7 +131,7 @@ public class NativeMcpServer {
             .instructions(
                 "Native Java MCP endpoint for Ghidra reverse engineering. " +
                 "Use search tools for functions/datatypes/symbols/xrefs, datatype/symbol/namespace edit tools, " +
-                "and function tools for rename, namespace, decompile and disassembly.")
+                "and function tools for rename, signature/calling-convention, namespace, decompile and disassembly.")
             .toolCall(tool("function_search",
                 "Search functions by name/namespace (exact case-insensitive or regex) and by address.",
                 """
@@ -526,6 +527,20 @@ public class NativeMcpServer {
                     }
                     """),
                 this::renameFunction)
+            .toolCall(tool("function_calling_convention_set",
+                "Set function calling convention by name or address.",
+                """
+                    {
+                      "type": "object",
+                      "required": ["calling_convention"],
+                      "properties": {
+                        "name": {"type": "string"},
+                        "address": {"type": "string"},
+                        "calling_convention": {"type": "string", "description": "Calling convention name (for example: default, unknown, __stdcall, __cdecl)"}
+                      }
+                    }
+                    """),
+                this::setFunctionCallingConvention)
             .toolCall(tool("function_signature_set",
                 "Set function signature/prototype by name or address.",
                 """
@@ -535,7 +550,8 @@ public class NativeMcpServer {
                       "properties": {
                         "name": {"type": "string"},
                         "address": {"type": "string"},
-                        "signature": {"type": "string", "description": "C-style signature (e.g. int foo(char *x))"}
+                        "signature": {"type": "string", "description": "C-style signature (e.g. int foo(char *x))"},
+                        "calling_convention": {"type": "string", "description": "Optional explicit calling convention override"}
                       }
                     }
                     """),
@@ -631,6 +647,7 @@ public class NativeMcpServer {
                 row.put("namespace", functionNamespace);
                 row.put("address", function.getEntryPoint().toString());
                 row.put("signature", function.getSignature().getPrototypeString());
+                row.put("calling_convention", function.getCallingConventionName());
                 filtered.add(row);
             }
 
@@ -1611,6 +1628,7 @@ public class NativeMcpServer {
             functionInfo.put("name", function.getName());
             functionInfo.put("address", function.getEntryPoint().toString());
             functionInfo.put("signature", function.getSignature().getPrototypeString());
+            functionInfo.put("calling_convention", function.getCallingConventionName());
 
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("tool", "function_disassembly_get");
@@ -1655,6 +1673,7 @@ public class NativeMcpServer {
             functionInfo.put("name", function.getName());
             functionInfo.put("address", function.getEntryPoint().toString());
             functionInfo.put("signature", function.getSignature().getPrototypeString());
+            functionInfo.put("calling_convention", function.getCallingConventionName());
 
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("tool", "function_decompile_get");
@@ -1704,11 +1723,50 @@ public class NativeMcpServer {
         }
     }
 
+    private McpSchema.CallToolResult setFunctionCallingConvention(McpTransportContext context, McpSchema.CallToolRequest request) {
+        try {
+            Program program = requireProgram();
+            Map<String, Object> args = safeArgs(request.arguments());
+            String rawCallingConvention = str(args, "calling_convention");
+            String callingConvention = rawCallingConvention != null ? rawCallingConvention.trim() : null;
+            if (!notBlank(callingConvention)) {
+                return error("calling_convention is required");
+            }
+
+            Function function = resolveFunction(program, args);
+            if (function == null) {
+                return error("Function not found (provide valid name or address)");
+            }
+
+            boolean success = TransactionHelper.executeInTransaction(
+                program,
+                "Set function calling convention for " + function.getName(),
+                () -> GhidraFunctionUtil.setFunctionCallingConvention(function, callingConvention)
+            );
+            if (!success) {
+                return error(callingConventionErrorMessage(function, callingConvention));
+            }
+
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("tool", "function_calling_convention_set");
+            result.put("name", function.getName());
+            result.put("address", function.getEntryPoint().toString());
+            result.put("calling_convention", function.getCallingConventionName());
+            result.put("signature", function.getSignature().getPrototypeString());
+            return ok(result);
+        } catch (Exception e) {
+            Msg.error(this, "function_calling_convention_set failed", e);
+            return error("function_calling_convention_set failed: " + e.getMessage());
+        }
+    }
+
     private McpSchema.CallToolResult setFunctionSignature(McpTransportContext context, McpSchema.CallToolRequest request) {
         try {
             Program program = requireProgram();
             Map<String, Object> args = safeArgs(request.arguments());
             String signature = str(args, "signature");
+            String rawCallingConvention = str(args, "calling_convention");
+            String callingConvention = rawCallingConvention != null ? rawCallingConvention.trim() : null;
             if (!notBlank(signature)) {
                 return error("signature is required");
             }
@@ -1721,9 +1779,12 @@ public class NativeMcpServer {
             boolean success = TransactionHelper.executeInTransaction(
                 program,
                 "Set function signature for " + function.getName(),
-                () -> GhidraFunctionUtil.setFunctionSignature(function, signature)
+                () -> GhidraFunctionUtil.setFunctionSignature(function, signature, callingConvention)
             );
             if (!success) {
+                if (notBlank(callingConvention)) {
+                    return error(callingConventionErrorMessage(function, callingConvention));
+                }
                 return error("Failed to set signature (invalid signature or unsupported calling convention)");
             }
 
@@ -1732,6 +1793,7 @@ public class NativeMcpServer {
             result.put("name", function.getName());
             result.put("address", function.getEntryPoint().toString());
             result.put("signature", function.getSignature().getPrototypeString());
+            result.put("calling_convention", function.getCallingConventionName());
             return ok(result);
         } catch (Exception e) {
             Msg.error(this, "function_signature_set failed", e);
@@ -3162,6 +3224,47 @@ public class NativeMcpServer {
     private int boundedLimit(int value) {
         if (value <= 0) return DEFAULT_LIMIT;
         return Math.min(value, MAX_LIMIT);
+    }
+
+    private String callingConventionErrorMessage(Function function, String requestedCallingConvention) {
+        List<String> available = availableCallingConventions(function);
+        if (available.isEmpty()) {
+            return "Failed to set calling convention: " + requestedCallingConvention;
+        }
+        return "Failed to set calling convention: " + requestedCallingConvention +
+            ". Available conventions: " + String.join(", ", available);
+    }
+
+    private List<String> availableCallingConventions(Function function) {
+        if (function == null || function.getProgram() == null) {
+            return Collections.emptyList();
+        }
+
+        LinkedHashSet<String> conventions = new LinkedHashSet<>();
+        String currentConvention = function.getCallingConventionName();
+        if (notBlank(currentConvention)) {
+            conventions.add(currentConvention);
+        }
+
+        try {
+            PrototypeModel defaultConvention = function.getProgram().getCompilerSpec().getDefaultCallingConvention();
+            if (defaultConvention != null && notBlank(defaultConvention.getName())) {
+                conventions.add(defaultConvention.getName());
+            }
+
+            PrototypeModel[] callingConventions = function.getProgram().getCompilerSpec().getCallingConventions();
+            if (callingConventions != null) {
+                for (PrototypeModel convention : callingConventions) {
+                    if (convention != null && notBlank(convention.getName())) {
+                        conventions.add(convention.getName());
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Msg.debug(this, "Failed to collect available calling conventions", e);
+        }
+
+        return new ArrayList<>(conventions);
     }
 
     private boolean notBlank(String value) {
