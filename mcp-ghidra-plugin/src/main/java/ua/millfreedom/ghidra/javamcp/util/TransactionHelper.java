@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 public final class TransactionHelper {
 
-    private static final long EDT_TIMEOUT_SECONDS = Long.getLong("ghidra.mcp.edt.timeout", 30L);
+    private static final long DEFAULT_EDT_TIMEOUT_SECONDS = Long.getLong("ghidra.mcp.edt.timeout", 30L);
     private static final ExecutorService EDT_EXECUTOR = Executors.newCachedThreadPool();
 
     private TransactionHelper() {
@@ -26,6 +26,15 @@ public final class TransactionHelper {
 
     public static <T> T executeInTransaction(Program program, String transactionName, GhidraSupplier<T> operation)
         throws TransactionException {
+        return executeInTransaction(program, transactionName, DEFAULT_EDT_TIMEOUT_SECONDS, operation);
+    }
+
+    public static <T> T executeInTransaction(
+        Program program,
+        String transactionName,
+        long timeoutSeconds,
+        GhidraSupplier<T> operation
+    ) throws TransactionException {
         if (program == null) {
             throw new IllegalArgumentException("Program cannot be null for transaction");
         }
@@ -53,17 +62,25 @@ public final class TransactionHelper {
             }
         };
 
+        Future<?> future = null;
         try {
-            Future<?> future = EDT_EXECUTOR.submit(() -> {
+            future = EDT_EXECUTOR.submit(() -> {
                 try {
                     SwingUtilities.invokeAndWait(edtTask);
                 } catch (Exception e) {
                     exception.set(e);
                 }
             });
-            future.get(EDT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (timeoutSeconds > 0) {
+                future.get(timeoutSeconds, TimeUnit.SECONDS);
+            } else {
+                future.get();
+            }
         } catch (TimeoutException e) {
-            throw new TransactionException("EDT timeout after " + EDT_TIMEOUT_SECONDS + "s for: " + transactionName, e);
+            if (future != null) {
+                future.cancel(true);
+            }
+            throw new TransactionException("EDT timeout after " + timeoutSeconds + "s for: " + transactionName, e);
         } catch (Exception e) {
             if (exception.get() != null) {
                 throw new TransactionException("Swing thread execution failed", exception.get());

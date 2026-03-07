@@ -77,6 +77,8 @@ public class NativeMcpServer {
     private static final String MCP_CONTEXT_PATH = "/mcp";
     private static final int DEFAULT_LIMIT = 10;
     private static final int MAX_LIMIT = 2000;
+    private static final long FUNCTION_SIGNATURE_EDT_TIMEOUT_SECONDS =
+        Long.getLong("ghidra.mcp.function_signature.edt.timeout", 120L);
     private static final Gson GSON = new Gson();
 
     private final PluginTool tool;
@@ -1779,6 +1781,7 @@ public class NativeMcpServer {
             boolean success = TransactionHelper.executeInTransaction(
                 program,
                 "Set function signature for " + function.getName(),
+                FUNCTION_SIGNATURE_EDT_TIMEOUT_SECONDS,
                 () -> GhidraFunctionUtil.setFunctionSignature(function, signature, callingConvention)
             );
             if (!success) {
