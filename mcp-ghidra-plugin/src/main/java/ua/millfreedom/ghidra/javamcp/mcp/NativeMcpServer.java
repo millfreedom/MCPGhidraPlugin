@@ -3,6 +3,7 @@ package ua.millfreedom.ghidra.javamcp.mcp;
 import com.google.gson.Gson;
 import com.sun.net.httpserver.HttpServer;
 import ua.millfreedom.ghidra.javamcp.util.GhidraFunctionUtil;
+import ua.millfreedom.ghidra.javamcp.util.GhidraScriptRunner;
 import ua.millfreedom.ghidra.javamcp.util.TransactionHelper;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
@@ -573,6 +574,31 @@ public class NativeMcpServer {
                     }
                     """),
                 this::setFunctionNamespace)
+            .toolCall(tool("script_run",
+                "Run a Ghidra script by name, optionally applying program option pages first.",
+                """
+                    {
+                      "type": "object",
+                      "required": ["name"],
+                      "properties": {
+                        "name": {"type": "string", "description": "Script filename or basename resolvable by Ghidra's script manager"},
+                        "args": {
+                          "type": "array",
+                          "items": {"type": "string"},
+                          "description": "Optional script arguments"
+                        },
+                        "program_options": {
+                          "type": "object",
+                          "description": "Program option pages to update before the script runs",
+                          "additionalProperties": {
+                            "type": "object",
+                            "additionalProperties": {"type": "string"}
+                          }
+                        }
+                      }
+                    }
+                    """),
+                this::runScript)
             .build();
     }
 
@@ -1838,6 +1864,60 @@ public class NativeMcpServer {
         } catch (Exception e) {
             Msg.error(this, "function_namespace_set failed", e);
             return error("function_namespace_set failed: " + e.getMessage());
+        }
+    }
+
+    private McpSchema.CallToolResult runScript(McpTransportContext context, McpSchema.CallToolRequest request) {
+        try {
+            Program program = requireProgram();
+            Map<String, Object> args = safeArgs(request.arguments());
+            String requestedName = str(args, "name");
+            if (!notBlank(requestedName)) {
+                return error("name is required");
+            }
+
+            List<String> scriptArgs = stringList(args, "args");
+            Map<String, Map<String, String>> programOptions = stringMapOfStringMaps(args, "program_options");
+            GhidraScriptRunner.Result scriptResult = GhidraScriptRunner.runScript(
+                tool,
+                program,
+                requestedName.trim(),
+                scriptArgs,
+                programOptions
+            );
+
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("tool", "script_run");
+            result.put("requested_name", scriptResult.requestedName());
+            result.put("resolved_name", scriptResult.resolvedName());
+            result.put("source_path", scriptResult.sourcePath());
+            result.put("runtime", scriptResult.runtime());
+            result.put("description", scriptResult.description());
+            result.put("args", scriptResult.scriptArgs());
+            result.put("program_options", scriptResult.appliedProgramOptions());
+            result.put("stdout", scriptResult.stdout());
+            result.put("stderr", scriptResult.stderr());
+            return ok(result);
+        } catch (IllegalArgumentException e) {
+            return error(e.getMessage());
+        } catch (GhidraScriptRunner.ScriptExecutionException e) {
+            Msg.error(this, "script_run failed", e);
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("tool", "script_run");
+            result.put("requested_name", e.getRequestedName());
+            result.put("resolved_name", e.getResolvedName());
+            result.put("source_path", e.getSourcePath());
+            result.put("stdout", e.getStdout());
+            result.put("stderr", e.getStderr());
+            result.put("error", e.getMessage());
+            return McpSchema.CallToolResult.builder()
+                .addTextContent(GSON.toJson(result))
+                .isError(Boolean.TRUE)
+                .structuredContent(result)
+                .build();
+        } catch (Exception e) {
+            Msg.error(this, "script_run failed", e);
+            return error("script_run failed: " + e.getMessage());
         }
     }
 
@@ -3129,6 +3209,62 @@ public class NativeMcpServer {
     private String strOrDefault(Map<String, Object> args, String key, String defaultValue) {
         String value = str(args, key);
         return value != null ? value : defaultValue;
+    }
+
+    private List<String> stringList(Map<String, Object> args, String key) {
+        Object val = args.get(key);
+        if (val == null) {
+            return List.of();
+        }
+        if (!(val instanceof List<?> list)) {
+            throw new IllegalArgumentException(key + " must be an array of strings");
+        }
+
+        List<String> values = new ArrayList<>(list.size());
+        for (Object item : list) {
+            if (!(item instanceof String stringValue)) {
+                throw new IllegalArgumentException(key + " must contain only strings");
+            }
+            values.add(stringValue);
+        }
+        return values;
+    }
+
+    private Map<String, Map<String, String>> stringMapOfStringMaps(Map<String, Object> args, String key) {
+        Object val = args.get(key);
+        if (val == null) {
+            return Collections.emptyMap();
+        }
+        if (!(val instanceof Map<?, ?> outerMap)) {
+            throw new IllegalArgumentException(
+                key + " must be an object mapping option page names to string option maps"
+            );
+        }
+
+        Map<String, Map<String, String>> result = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> outerEntry : outerMap.entrySet()) {
+            if (!(outerEntry.getKey() instanceof String pageName) || !notBlank(pageName)) {
+                throw new IllegalArgumentException(key + " contains an invalid option page name");
+            }
+            if (!(outerEntry.getValue() instanceof Map<?, ?> innerMap)) {
+                throw new IllegalArgumentException(key + "." + pageName + " must be an object");
+            }
+
+            Map<String, String> pageOptions = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> innerEntry : innerMap.entrySet()) {
+                if (!(innerEntry.getKey() instanceof String optionName) || !notBlank(optionName)) {
+                    throw new IllegalArgumentException(key + "." + pageName + " contains an invalid option name");
+                }
+                if (!(innerEntry.getValue() instanceof String optionValue)) {
+                    throw new IllegalArgumentException(
+                        key + "." + pageName + "." + optionName + " must be a string"
+                    );
+                }
+                pageOptions.put(optionName, optionValue);
+            }
+            result.put(pageName, pageOptions);
+        }
+        return result;
     }
 
     private boolean bool(Map<String, Object> args, String key, boolean defaultValue) {

@@ -19,6 +19,7 @@
     <ghidra.softwaremodeling.jar>${ghidra.install.dir}/Framework/SoftwareModeling/lib/SoftwareModeling.jar</ghidra.softwaremodeling.jar>
     <ghidra.project.jar>${ghidra.install.dir}/Framework/Project/lib/Project.jar</ghidra.project.jar>
     <ghidra.docking.jar>${ghidra.install.dir}/Framework/Docking/lib/Docking.jar</ghidra.docking.jar>
+    <ghidra.gui.jar>${ghidra.install.dir}/Framework/Gui/lib/Gui.jar</ghidra.gui.jar>
     <ghidra.decompiler.jar>${ghidra.install.dir}/Features/Decompiler/lib/Decompiler.jar</ghidra.decompiler.jar>
     <ghidra.utility.jar>${ghidra.install.dir}/Framework/Utility/lib/Utility.jar</ghidra.utility.jar>
     <ghidra.base.jar>${ghidra.install.dir}/Features/Base/lib/Base.jar</ghidra.base.jar>
@@ -64,6 +65,13 @@
       <version>${ghidra.version}</version>
       <scope>system</scope>
       <systemPath>${ghidra.docking.jar}</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>ghidra</groupId>
+      <artifactId>Gui</artifactId>
+      <version>${ghidra.version}</version>
+      <scope>system</scope>
+      <systemPath>${ghidra.gui.jar}</systemPath>
     </dependency>
     <dependency>
       <groupId>ghidra</groupId>
