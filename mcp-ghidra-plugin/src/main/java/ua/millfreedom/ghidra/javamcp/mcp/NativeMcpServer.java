@@ -21,6 +21,7 @@ import ghidra.program.model.data.ParameterDefinition;
 import ghidra.program.model.data.Pointer;
 import ghidra.program.model.data.Structure;
 import ghidra.program.model.data.TypeDef;
+import ghidra.program.model.data.Undefined1DataType;
 import ghidra.program.model.data.Union;
 import ghidra.program.model.listing.Data;
 import ghidra.program.model.listing.DataIterator;
@@ -248,6 +249,49 @@ public class NativeMcpServer {
                     }
                     """),
                 this::renameDatatypeField)
+            .toolCall(tool("datatype_length_set",
+                "Set the total length of a structure datatype without reflowing existing offsets. v1 supports grow-only.",
+                """
+                    {
+                      "type": "object",
+                      "required": ["length"],
+                      "properties": {
+                        "path": {"type": "string"},
+                        "name": {"type": "string"},
+                        "length": {
+                          "description": "Target structure length as an integer or hex string (e.g. 0x60)",
+                          "oneOf": [{"type": "integer"}, {"type": "string"}]
+                        }
+                      }
+                    }
+                    """),
+                this::setDatatypeLength)
+            .toolCall(tool("datatype_component_type_set",
+                "Set or clear a structure component at an exact byte offset without shifting later offsets.",
+                """
+                    {
+                      "type": "object",
+                      "required": ["offset"],
+                      "properties": {
+                        "path": {"type": "string"},
+                        "name": {"type": "string"},
+                        "offset": {
+                          "description": "Datatype-relative byte offset as an integer or hex string (e.g. 0x58)",
+                          "oneOf": [{"type": "integer"}, {"type": "string"}]
+                        },
+                        "data_type": {
+                          "type": "string",
+                          "description": "Replacement datatype selector. Use a datatype path or a datatype name such as undefined4."
+                        },
+                        "clear": {"type": "boolean", "default": false},
+                        "clear_length": {
+                          "description": "Length to clear back to undefined bytes, as an integer or hex string",
+                          "oneOf": [{"type": "integer"}, {"type": "string"}]
+                        }
+                      }
+                    }
+                    """),
+                this::setDatatypeComponentType)
             .toolCall(tool("category_rename",
                 "Rename an existing datatype category by full path.",
                 """
@@ -856,6 +900,161 @@ public class NativeMcpServer {
         } catch (Exception e) {
             Msg.error(this, "datatype_field_rename failed", e);
             return error("datatype_field_rename failed: " + e.getMessage());
+        }
+    }
+
+    private McpSchema.CallToolResult setDatatypeLength(McpTransportContext context, McpSchema.CallToolRequest request) {
+        try {
+            Program program = requireProgram();
+            Map<String, Object> args = safeArgs(request.arguments());
+
+            int requestedLength = requiredNonNegativeInt(args, "length");
+
+            Resolution<DataType> resolved = resolveDataType(program, args);
+            if (!resolved.isOk()) {
+                return error(resolved.error());
+            }
+
+            Resolution<Structure> structureResolution = resolveEditableStructure(resolved.value());
+            if (!structureResolution.isOk()) {
+                return error(structureResolution.error());
+            }
+            Structure structure = structureResolution.value();
+
+            int oldLength = exactStructureLength(structure);
+            if (requestedLength < oldLength) {
+                return error(
+                    "datatype_length_set currently supports grow-only updates. " +
+                    "Requested " + requestedLength + " but current length is " + oldLength
+                );
+            }
+
+            if (requestedLength > oldLength) {
+                int growth = requestedLength - oldLength;
+                TransactionHelper.executeInTransaction(
+                    program,
+                    "Set datatype length for " + structure.getPathName(),
+                    () -> {
+                        structure.growStructure(growth);
+                        return null;
+                    }
+                );
+            }
+
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("tool", "datatype_length_set");
+            result.put("path", structure.getPathName());
+            result.put("kind", kindOf(structure));
+            result.put("old_length", oldLength);
+            result.put("new_length", exactStructureLength(structure));
+            return ok(result);
+        } catch (Exception e) {
+            Msg.error(this, "datatype_length_set failed", e);
+            return error("datatype_length_set failed: " + e.getMessage());
+        }
+    }
+
+    private McpSchema.CallToolResult setDatatypeComponentType(McpTransportContext context, McpSchema.CallToolRequest request) {
+        try {
+            Program program = requireProgram();
+            Map<String, Object> args = safeArgs(request.arguments());
+
+            int offset = requiredNonNegativeInt(args, "offset");
+            boolean clear = bool(args, "clear", false);
+            boolean hasDataType = notBlank(str(args, "data_type"));
+            if (clear == hasDataType) {
+                return error("Provide exactly one operation: data_type to set, or clear=true to clear");
+            }
+
+            Resolution<DataType> resolved = resolveDataType(program, args);
+            if (!resolved.isOk()) {
+                return error(resolved.error());
+            }
+
+            Resolution<Structure> structureResolution = resolveEditableStructure(resolved.value());
+            if (!structureResolution.isOk()) {
+                return error(structureResolution.error());
+            }
+            Structure structure = structureResolution.value();
+
+            if (clear) {
+                int clearLength = requiredPositiveInt(args, "clear_length");
+                StructureRangeCheck rangeCheck = analyzeStructureRange(structure, offset, clearLength);
+                if (!rangeCheck.isOk()) {
+                    return error(rangeCheck.error());
+                }
+
+                RangeDescription oldRange = describeRangeBeforeChange(rangeCheck, offset, clearLength);
+                if (rangeCheck.overlappingDefinedComponent() != null) {
+                    TransactionHelper.executeInTransaction(
+                        program,
+                        "Clear datatype component at " + structure.getPathName() + " + " + toHex(offset),
+                        () -> {
+                            structure.clearAtOffset(offset);
+                            return null;
+                        }
+                    );
+                }
+
+                Map<String, Object> result = new LinkedHashMap<>();
+                result.put("tool", "datatype_component_type_set");
+                result.put("path", structure.getPathName());
+                result.put("kind", kindOf(structure));
+                result.put("offset", offset);
+                result.put("length", clearLength);
+                result.put("operation", "clear");
+                result.put("old_component", oldRange.label());
+                result.put("new_component", undefinedRangeLabel(clearLength));
+                result.put("old_component_details", oldRange.details());
+                result.put("new_component_details", undefinedRangeDescriptor(offset, clearLength));
+                return ok(result);
+            }
+
+            String dataTypeSelector = str(args, "data_type");
+            Resolution<DataType> replacementResolution = resolveReferencedDataType(program, dataTypeSelector);
+            if (!replacementResolution.isOk()) {
+                return error(replacementResolution.error());
+            }
+
+            DataType replacementType = replacementResolution.value();
+            Resolution<Integer> replacementLengthResolution = resolveFixedLengthDataTypeLength(replacementType);
+            if (!replacementLengthResolution.isOk()) {
+                return error(replacementLengthResolution.error());
+            }
+            int replacementLength = replacementLengthResolution.value();
+
+            StructureRangeCheck rangeCheck = analyzeStructureRange(structure, offset, replacementLength);
+            if (!rangeCheck.isOk()) {
+                return error(rangeCheck.error());
+            }
+
+            RangeDescription oldRange = describeRangeBeforeChange(rangeCheck, offset, replacementLength);
+            TransactionHelper.executeInTransaction(
+                program,
+                "Set datatype component at " + structure.getPathName() + " + " + toHex(offset),
+                () -> {
+                    structure.replaceAtOffset(offset, replacementType, replacementLength, null, null);
+                    return null;
+                }
+            );
+
+            DataTypeComponent newComponent = structure.getComponentContaining(offset);
+
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("tool", "datatype_component_type_set");
+            result.put("path", structure.getPathName());
+            result.put("kind", kindOf(structure));
+            result.put("offset", offset);
+            result.put("length", replacementLength);
+            result.put("operation", "set");
+            result.put("old_component", oldRange.label());
+            result.put("new_component", componentLabel(newComponent));
+            result.put("old_component_details", oldRange.details());
+            result.put("new_component_details", componentDescriptor(newComponent));
+            return ok(result);
+        } catch (Exception e) {
+            Msg.error(this, "datatype_component_type_set failed", e);
+            return error("datatype_component_type_set failed: " + e.getMessage());
         }
     }
 
@@ -2272,6 +2471,50 @@ public class NativeMcpServer {
         return row;
     }
 
+    private Map<String, Object> componentDescriptor(DataTypeComponent component) {
+        return component != null ? componentRow(component) : null;
+    }
+
+    private Map<String, Object> undefinedRangeDescriptor(int offset, int length) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("offset", offset);
+        row.put("end_offset", offset + length - 1);
+        row.put("length", length);
+        row.put("field_name", null);
+        row.put("default_field_name", null);
+        row.put("comment", null);
+        row.put("is_bitfield", false);
+        row.put("is_zero_bitfield", false);
+        row.put("is_undefined", true);
+        row.put("data_type", dataTypeRef(Undefined1DataType.dataType));
+        row.put("representation", undefinedRangeLabel(length));
+        return row;
+    }
+
+    private Resolution<Structure> resolveEditableStructure(DataType dataType) {
+        if (!(dataType instanceof Structure structure)) {
+            return Resolution.error("Datatype must be a structure");
+        }
+        if (structure.isPackingEnabled()) {
+            return Resolution.error(
+                "Packed structures are not supported by exact-offset layout tools because Ghidra may repack offsets"
+            );
+        }
+        return Resolution.ok(structure);
+    }
+
+    private int exactStructureLength(Structure structure) {
+        try {
+            Object isZeroLength = invokeCompatibleMethod(structure, "isZeroLength");
+            if (isZeroLength instanceof Boolean zero && zero) {
+                return 0;
+            }
+        } catch (Exception ignore) {
+            // Fall through to getLength() for structure implementations without isZeroLength().
+        }
+        return structure.getLength();
+    }
+
     private Resolution<DataType> resolveDataType(Program program, Map<String, Object> args) {
         String path = str(args, "path");
         String name = str(args, "name");
@@ -2501,6 +2744,130 @@ public class NativeMcpServer {
         }
 
         return Resolution.ok(candidates.get(0));
+    }
+
+    private Resolution<DataType> resolveReferencedDataType(Program program, String selector) {
+        if (!notBlank(selector)) {
+            return Resolution.error("data_type is required");
+        }
+
+        Map<String, Object> selectorArgs = new LinkedHashMap<>();
+        if (selector.startsWith("/")) {
+            selectorArgs.put("path", selector);
+        } else {
+            selectorArgs.put("name", selector);
+        }
+        return resolveDataType(program, selectorArgs);
+    }
+
+    private Resolution<Integer> resolveFixedLengthDataTypeLength(DataType dataType) {
+        if (dataType == null) {
+            return Resolution.error("Replacement datatype is required");
+        }
+        if (dataType instanceof BitFieldDataType) {
+            return Resolution.error("Bitfield datatypes are not supported by datatype_component_type_set");
+        }
+
+        int length = dataType.getLength();
+        if (length <= 0) {
+            return Resolution.error(
+                "Replacement datatype must have a fixed positive length: " + dataType.getPathName()
+            );
+        }
+        return Resolution.ok(length);
+    }
+
+    private StructureRangeCheck analyzeStructureRange(Structure structure, int offset, int length) {
+        int structureLength = exactStructureLength(structure);
+        if (offset < 0) {
+            return StructureRangeCheck.error("offset must be non-negative");
+        }
+        if (length <= 0) {
+            return StructureRangeCheck.error("length must be positive");
+        }
+        if (offset >= structureLength) {
+            return StructureRangeCheck.error(
+                "Offset " + toHex(offset) + " is outside structure length " + structureLength
+            );
+        }
+
+        long endExclusive = (long) offset + (long) length;
+        if (endExclusive > structureLength) {
+            return StructureRangeCheck.error(
+                "Requested range " + toHex(offset) + ".." + toHex((int) endExclusive - 1) +
+                " exceeds structure length " + structureLength
+            );
+        }
+
+        List<DataTypeComponent> overlappingDefined = new ArrayList<>();
+        for (DataTypeComponent component : structure.getComponents()) {
+            if (component == null || component.isUndefined()) {
+                continue;
+            }
+            if (component.isBitFieldComponent() || component.getLength() <= 0) {
+                int componentStart = component.getOffset();
+                int componentEndExclusive = componentStart + Math.max(component.getLength(), 1);
+                if (rangesOverlap(offset, (int) endExclusive, componentStart, componentEndExclusive)) {
+                    return StructureRangeCheck.error(
+                        "Bitfield or zero-length components are not supported at " + toHex(componentStart)
+                    );
+                }
+                continue;
+            }
+
+            int componentStart = component.getOffset();
+            int componentEndExclusive = componentStart + component.getLength();
+            if (rangesOverlap(offset, (int) endExclusive, componentStart, componentEndExclusive)) {
+                overlappingDefined.add(component);
+            }
+        }
+
+        if (overlappingDefined.isEmpty()) {
+            return StructureRangeCheck.ok(null, true);
+        }
+
+        if (overlappingDefined.size() == 1) {
+            DataTypeComponent component = overlappingDefined.get(0);
+            if (component.getOffset() == offset && component.getLength() == length) {
+                return StructureRangeCheck.ok(component, false);
+            }
+        }
+
+        List<String> overlaps = new ArrayList<>();
+        for (DataTypeComponent component : overlappingDefined) {
+            overlaps.add(
+                componentLabel(component) +
+                    "@" + toHex(component.getOffset()) +
+                    ":" + component.getLength()
+            );
+        }
+        return StructureRangeCheck.error(
+            "Requested range partially overlaps incompatible defined component(s): " + String.join(", ", overlaps)
+        );
+    }
+
+    private boolean rangesOverlap(int startA, int endExclusiveA, int startB, int endExclusiveB) {
+        return startA < endExclusiveB && startB < endExclusiveA;
+    }
+
+    private RangeDescription describeRangeBeforeChange(StructureRangeCheck rangeCheck, int offset, int length) {
+        if (rangeCheck.wasUndefinedRange()) {
+            return new RangeDescription(undefinedRangeLabel(length), undefinedRangeDescriptor(offset, length));
+        }
+
+        DataTypeComponent component = rangeCheck.overlappingDefinedComponent();
+        return new RangeDescription(componentLabel(component), componentDescriptor(component));
+    }
+
+    private String componentLabel(DataTypeComponent component) {
+        if (component == null || component.getDataType() == null) {
+            return null;
+        }
+        return component.getDataType().getName();
+    }
+
+    private String undefinedRangeLabel(int length) {
+        return length == 1 ? "undefined" : "undefined[" + length + "]";
     }
 
     private Resolution<Symbol> resolveSymbol(Program program, Map<String, Object> args, String namespaceKey) {
@@ -3356,6 +3723,33 @@ public class NativeMcpServer {
         return parsed != null ? parsed : defaultValue;
     }
 
+    private int requiredNonNegativeInt(Map<String, Object> args, String key) {
+        int value = requiredInt(args, key);
+        if (value < 0) {
+            throw new IllegalArgumentException(key + " must be non-negative");
+        }
+        return value;
+    }
+
+    private int requiredPositiveInt(Map<String, Object> args, String key) {
+        int value = requiredInt(args, key);
+        if (value <= 0) {
+            throw new IllegalArgumentException(key + " must be positive");
+        }
+        return value;
+    }
+
+    private int requiredInt(Map<String, Object> args, String key) {
+        if (!args.containsKey(key)) {
+            throw new IllegalArgumentException(key + " is required");
+        }
+        long value = parseFlexibleLong(args.get(key), key);
+        if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(key + " exceeds 32-bit range: " + value);
+        }
+        return (int) value;
+    }
+
     private int nonNegative(int value) {
         return Math.max(0, value);
     }
@@ -3437,6 +3831,60 @@ public class NativeMcpServer {
 
         String error() {
             return error;
+        }
+    }
+
+    private static final class StructureRangeCheck {
+        private final DataTypeComponent overlappingDefinedComponent;
+        private final boolean undefinedRange;
+        private final String error;
+
+        private StructureRangeCheck(DataTypeComponent overlappingDefinedComponent, boolean undefinedRange, String error) {
+            this.overlappingDefinedComponent = overlappingDefinedComponent;
+            this.undefinedRange = undefinedRange;
+            this.error = error;
+        }
+
+        static StructureRangeCheck ok(DataTypeComponent overlappingDefinedComponent, boolean undefinedRange) {
+            return new StructureRangeCheck(overlappingDefinedComponent, undefinedRange, null);
+        }
+
+        static StructureRangeCheck error(String error) {
+            return new StructureRangeCheck(null, false, error);
+        }
+
+        boolean isOk() {
+            return error == null;
+        }
+
+        DataTypeComponent overlappingDefinedComponent() {
+            return overlappingDefinedComponent;
+        }
+
+        boolean wasUndefinedRange() {
+            return undefinedRange;
+        }
+
+        String error() {
+            return error;
+        }
+    }
+
+    private static final class RangeDescription {
+        private final String label;
+        private final Map<String, Object> details;
+
+        private RangeDescription(String label, Map<String, Object> details) {
+            this.label = label;
+            this.details = details;
+        }
+
+        String label() {
+            return label;
+        }
+
+        Map<String, Object> details() {
+            return details;
         }
     }
 
