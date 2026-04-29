@@ -32,6 +32,7 @@ import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.InstructionIterator;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.lang.PrototypeModel;
+import ghidra.program.model.scalar.Scalar;
 import ghidra.program.model.symbol.Namespace;
 import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceManager;
@@ -41,6 +42,7 @@ import ghidra.program.model.symbol.SymbolTable;
 import ghidra.program.model.symbol.SymbolType;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.util.Msg;
+import ghidra.util.data.DataTypeParser;
 import ghidra.util.task.TaskMonitor;
 import io.modelcontextprotocol.common.McpTransportContext;
 import io.modelcontextprotocol.json.McpJsonDefaults;
@@ -134,8 +136,9 @@ public class NativeMcpServer {
                 .build())
             .instructions(
                 "Native Java MCP endpoint for Ghidra reverse engineering. " +
-                "Use search tools for functions/datatypes/symbols/xrefs, datatype/symbol/namespace edit tools, " +
-                "and function tools for rename, signature/calling-convention, namespace, decompile and disassembly.")
+                "Use search tools for functions/datatypes/symbols/xrefs, data inspection by address, " +
+                "datatype/symbol/namespace edit tools, and function tools for rename, " +
+                "signature/calling-convention, namespace, decompile and disassembly.")
             .toolCall(tool("function_search",
                 "Search functions by name/namespace (exact case-insensitive or regex) and by address.",
                 """
@@ -449,6 +452,23 @@ public class NativeMcpServer {
                     }
                     """),
                 this::searchXrefs)
+            .toolCall(tool("data_get",
+                "Get detailed data information by address.",
+                """
+                    {
+                      "type": "object",
+                      "required": ["address"],
+                      "properties": {
+                        "address": {"type": "string", "description": "Hex address"},
+                        "address_mode": {"type": "string", "enum": ["exact", "containing"], "default": "containing"},
+                        "defined_only": {"type": "boolean", "default": true},
+                        "include_components": {"type": "boolean", "default": true},
+                        "component_offset": {"type": "integer", "minimum": 0, "default": 0},
+                        "component_limit": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 10}
+                      }
+                    }
+                    """),
+                this::getData)
             .toolCall(tool("symbol_search",
                 "Search symbols by name/namespace/type/address (exact case-insensitive or regex).",
                 """
@@ -796,6 +816,52 @@ public class NativeMcpServer {
         } catch (Exception e) {
             Msg.error(this, "datatype_get_details failed", e);
             return error("datatype_get_details failed: " + e.getMessage());
+        }
+    }
+
+    private McpSchema.CallToolResult getData(McpTransportContext context, McpSchema.CallToolRequest request) {
+        try {
+            Program program = requireProgram();
+            Map<String, Object> args = safeArgs(request.arguments());
+
+            String addressStr = str(args, "address");
+            if (!notBlank(addressStr)) {
+                return error("address is required");
+            }
+
+            Address requestedAddress = parseAddress(program, addressStr);
+            if (requestedAddress == null) {
+                return error("Invalid address: " + addressStr);
+            }
+
+            String addressMode = strOrDefault(args, "address_mode", "containing");
+            if (!"exact".equalsIgnoreCase(addressMode) && !"containing".equalsIgnoreCase(addressMode)) {
+                return error("address_mode must be one of: exact, containing");
+            }
+
+            boolean definedOnly = bool(args, "defined_only", true);
+            boolean includeComponents = bool(args, "include_components", true);
+            int componentOffset = nonNegative(intVal(args, "component_offset", 0));
+            int componentLimit = boundedLimit(intVal(args, "component_limit", DEFAULT_LIMIT));
+
+            Resolution<Data> dataResolution = resolveData(program, requestedAddress, addressMode, definedOnly);
+            if (!dataResolution.isOk()) {
+                return error(dataResolution.error());
+            }
+
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("tool", "data_get");
+            result.put("requested_address", requestedAddress.toString());
+            result.put("address_mode", "exact".equalsIgnoreCase(addressMode) ? "exact" : "containing");
+            result.put("defined_only", definedOnly);
+            result.put(
+                "data",
+                dataDetails(program, dataResolution.value(), requestedAddress, includeComponents, componentOffset, componentLimit)
+            );
+            return ok(result);
+        } catch (Exception e) {
+            Msg.error(this, "data_get failed", e);
+            return error("data_get failed: " + e.getMessage());
         }
     }
 
@@ -2518,12 +2584,46 @@ public class NativeMcpServer {
     private Resolution<DataType> resolveDataType(Program program, Map<String, Object> args) {
         String path = str(args, "path");
         String name = str(args, "name");
+
         DataTypeManager dataTypeManager = program.getDataTypeManager();
 
         if (!notBlank(path) && !notBlank(name)) {
             return Resolution.error("Provide datatype path or name");
         }
 
+        Resolution<DataType> directResolution = resolveStoredDataType(dataTypeManager, path, name);
+        if (directResolution.isOk()) {
+            return directResolution;
+        }
+
+        if (!isArrayTypeName(name)) {
+            return directResolution;
+        }
+
+        String baseName = baseNameFromArrayTypeName(name);
+        if (!notBlank(baseName)) {
+            return directResolution;
+        }
+
+        Resolution<DataType> baseResolution = resolveStoredDataType(dataTypeManager, null, baseName);
+        if (!baseResolution.isOk()) {
+            return Resolution.error("Base datatype not found for array type '" + name + "': " + baseResolution.error());
+        }
+
+        try {
+            DataTypeParser parser = new DataTypeParser(
+                dataTypeManager,
+                dataTypeManager,
+                null,
+                DataTypeParser.AllowedDataTypes.ALL
+            );
+            return Resolution.ok(parser.parse(name, baseResolution.value()));
+        } catch (Exception e) {
+            return Resolution.error("Failed to parse array datatype '" + name + "': " + e.getMessage());
+        }
+    }
+
+    private Resolution<DataType> resolveStoredDataType(DataTypeManager dataTypeManager, String path, String name) {
         if (notBlank(path)) {
             DataType byPath = dataTypeManager.getDataType(path);
             if (byPath != null) {
@@ -2563,6 +2663,21 @@ public class NativeMcpServer {
         }
 
         return Resolution.error("Datatype not found for name: " + name);
+    }
+
+    private boolean isArrayTypeName(String name) {
+        return name != null && name.contains("[") && name.contains("]");
+    }
+
+    private String baseNameFromArrayTypeName(String name) {
+        if (name == null) {
+            return null;
+        }
+        int arrayStart = name.indexOf('[');
+        if (arrayStart < 0) {
+            return null;
+        }
+        return name.substring(0, arrayStart).trim();
     }
 
     private String summarizeDataTypes(List<DataType> dataTypes) {
@@ -2972,6 +3087,136 @@ public class NativeMcpServer {
         return row;
     }
 
+    private Map<String, Object> dataDetails(
+        Program program,
+        Data data,
+        Address requestedAddress,
+        boolean includeComponents,
+        int componentOffset,
+        int componentLimit
+    ) {
+        Map<String, Object> row = new LinkedHashMap<>(dataRow(data));
+        row.put("is_constant", data.isConstant());
+        row.put("is_writable", data.isWritable());
+        row.put("is_volatile", data.isVolatile());
+        row.put("root_offset", data.getRootOffset());
+        row.put("parent_offset", data.getParentOffset());
+        row.put("component_index", data.getComponentIndex());
+        row.put("component_level", data.getComponentLevel());
+        row.put("bytes", codeUnitBytesHex(data));
+
+        Data parent = data.getParent();
+        if (parent != null) {
+            row.put("parent_address", parent.getAddress().toString());
+            row.put("parent_path_name", parent.getPathName());
+        }
+
+        Data root = data.getRoot();
+        if (root != null) {
+            row.put("root_address", root.getAddress().toString());
+            row.put("root_path_name", root.getPathName());
+        }
+
+        Symbol primarySymbol = data.getPrimarySymbol();
+        if (primarySymbol != null) {
+            row.put("primary_symbol", symbolRow(primarySymbol));
+        }
+
+        Symbol[] symbols = data.getSymbols();
+        if (symbols != null && symbols.length > 0) {
+            List<Map<String, Object>> symbolRows = new ArrayList<>();
+            for (Symbol symbol : symbols) {
+                if (symbol != null) {
+                    symbolRows.add(symbolRow(symbol));
+                }
+            }
+            row.put("symbols", symbolRows);
+        }
+
+        Reference[] valueReferences = data.getValueReferences();
+        if (valueReferences != null && valueReferences.length > 0) {
+            List<Map<String, Object>> refs = new ArrayList<>();
+            for (Reference ref : valueReferences) {
+                if (ref != null) {
+                    refs.add(referenceRow(program, ref, "from"));
+                }
+            }
+            row.put("value_references", refs);
+        }
+
+        Function containingFunction = program.getFunctionManager().getFunctionContaining(data.getAddress());
+        if (containingFunction != null) {
+            Map<String, Object> functionRef = new LinkedHashMap<>();
+            functionRef.put("name", containingFunction.getName());
+            functionRef.put("namespace", containingFunction.getParentNamespace() != null
+                ? containingFunction.getParentNamespace().getName(true)
+                : "");
+            functionRef.put("address", containingFunction.getEntryPoint().toString());
+            row.put("containing_function", functionRef);
+        }
+
+        if (requestedAddress != null && data.contains(requestedAddress)) {
+            int requestedOffset = (int) requestedAddress.subtract(data.getMinAddress());
+            row.put("requested_offset", requestedOffset);
+
+            Data componentContaining = data.getComponentContaining(requestedOffset);
+            if (componentContaining != null && componentContaining != data) {
+                row.put("component_containing", dataRow(componentContaining));
+            }
+
+            Data primitiveAt = data.getPrimitiveAt(requestedOffset);
+            if (primitiveAt != null && primitiveAt != data) {
+                row.put("primitive_at", dataRow(primitiveAt));
+            }
+        }
+
+        if (includeComponents && data.getNumComponents() > 0) {
+            List<Map<String, Object>> components = new ArrayList<>();
+            for (int i = 0; i < data.getNumComponents(); i++) {
+                Data component = data.getComponent(i);
+                if (component != null) {
+                    components.add(dataRow(component));
+                }
+            }
+
+            int start = Math.min(componentOffset, components.size());
+            int end = Math.min(start + componentLimit, components.size());
+            row.put("component_offset", start);
+            row.put("component_limit", componentLimit);
+            row.put("component_total", components.size());
+            row.put("components", components.subList(start, end));
+        }
+
+        return row;
+    }
+
+    private Map<String, Object> dataRow(Data data) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("address", data.getAddress().toString());
+        row.put("min_address", data.getMinAddress().toString());
+        row.put("max_address", data.getMaxAddress().toString());
+        row.put("length", data.getLength());
+        row.put("mnemonic", data.getMnemonicString());
+        row.put("label", blankToNull(data.getLabel()));
+        row.put("field_name", blankToNull(data.getFieldName()));
+        row.put("path_name", blankToNull(data.getPathName()));
+        row.put("component_path_name", blankToNull(data.getComponentPathName()));
+        row.put("data_type", dataTypeRef(data.getDataType()));
+        row.put("base_data_type", dataTypeRef(data.getBaseDataType()));
+        row.put("value_class", data.getValueClass() != null ? data.getValueClass().getName() : "");
+        row.put("value", serializeDataValue(data.getValue()));
+        row.put("value_repr", data.getDefaultValueRepresentation());
+        row.put("has_string_value", data.hasStringValue());
+        row.put("is_defined", data.isDefined());
+        row.put("is_pointer", data.isPointer());
+        row.put("is_union", data.isUnion());
+        row.put("is_structure", data.isStructure());
+        row.put("is_array", data.isArray());
+        row.put("is_dynamic", data.isDynamic());
+        row.put("num_components", data.getNumComponents());
+        return row;
+    }
+
     private String symbolNamespace(Symbol symbol) {
         Namespace parent = symbol != null ? symbol.getParentNamespace() : null;
         return parent != null ? parent.getName(true) : "";
@@ -3330,6 +3575,89 @@ public class NativeMcpServer {
             row.put("to_function_addr", toFunction.getEntryPoint().toString());
         }
         return row;
+    }
+
+    private Resolution<Data> resolveData(Program program, Address address, String addressMode, boolean definedOnly) {
+        Data data;
+        if ("exact".equalsIgnoreCase(addressMode)) {
+            data = definedOnly
+                ? program.getListing().getDefinedDataAt(address)
+                : program.getListing().getDataAt(address);
+            if (data == null) {
+                return Resolution.error("Data not found at address: " + address);
+            }
+            return Resolution.ok(data);
+        }
+
+        if ("containing".equalsIgnoreCase(addressMode)) {
+            data = definedOnly
+                ? program.getListing().getDefinedDataContaining(address)
+                : program.getListing().getDataContaining(address);
+            if (data == null) {
+                return Resolution.error("Data not found containing address: " + address);
+            }
+            return Resolution.ok(data);
+        }
+
+        return Resolution.error("address_mode must be one of: exact, containing");
+    }
+
+    private Object serializeDataValue(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Scalar scalar) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("kind", "scalar");
+            row.put("signed", scalar.isSigned());
+            row.put("signed_value", scalar.getSignedValue());
+            row.put("unsigned_value", Long.toUnsignedString(scalar.getUnsignedValue()));
+            row.put("value_hex", "0x" + scalar.getBigInteger().toString(16).toUpperCase(Locale.ROOT));
+            row.put("bit_length", scalar.bitLength());
+            return row;
+        }
+        if (value instanceof Address address) {
+            return address.toString();
+        }
+        if (value instanceof BigInteger bigInteger) {
+            return bigInteger.toString();
+        }
+        if (value instanceof Character character) {
+            return character.toString();
+        }
+        if (value instanceof byte[] bytes) {
+            return bytesToHex(bytes);
+        }
+        if (value instanceof Object[] values) {
+            List<Object> items = new ArrayList<>();
+            for (Object item : values) {
+                items.add(serializeDataValue(item));
+            }
+            return items;
+        }
+        if (value instanceof Number || value instanceof Boolean || value instanceof String) {
+            return value;
+        }
+        return value.toString();
+    }
+
+    private String codeUnitBytesHex(Data data) {
+        try {
+            return bytesToHex(data.getBytes());
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private String bytesToHex(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            return "";
+        }
+        StringBuilder hex = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            hex.append(String.format("%02X", b & 0xFF));
+        }
+        return hex.toString();
     }
 
     private boolean matchesRefType(Reference reference, String filter) {

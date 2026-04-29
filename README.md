@@ -8,7 +8,7 @@ Native Java-only MCP plugin. Written solely by OpenAI's Codex, directed by millf
 
 This project includes only Java MCP-related code:
 - MCP HTTP transport (`/mcp`) implemented with `modelcontextprotocol/java-sdk`
-- Native MCP tool server (search/functions/datatypes/xrefs/rename/namespace/signature/decompile/disassembly)
+- Native MCP tool server (search/data/functions/datatypes/xrefs/rename/namespace/signature/decompile/disassembly)
 - Minimal Ghidra plugin bootstrap (`MCPGhidraPlugin`)
 - Minimal local utilities required by the MCP stack (CORS, transaction helper, decompiler/signature helper)
 
