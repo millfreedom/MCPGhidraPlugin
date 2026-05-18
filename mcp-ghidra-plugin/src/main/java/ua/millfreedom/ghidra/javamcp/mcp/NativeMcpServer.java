@@ -82,7 +82,7 @@ public class NativeMcpServer {
     private static final int DEFAULT_LIMIT = 10;
     private static final int MAX_LIMIT = 2000;
     private static final long FUNCTION_SIGNATURE_EDT_TIMEOUT_SECONDS =
-        Long.getLong("ghidra.mcp.function_signature.edt.timeout", 120L);
+        Long.getLong("ghidra.mcp.function_signature.edt.timeout", 600L);
     private static final Gson GSON = new Gson();
 
     private final PluginTool tool;
@@ -572,7 +572,7 @@ public class NativeMcpServer {
                         "name": {"type": "string"},
                         "address": {"type": "string"},
                         "show_constants": {"type": "boolean", "default": true},
-                        "timeout": {"type": "integer", "minimum": 1, "maximum": 300, "default": 30},
+                        "timeout": {"type": "integer", "minimum": 1, "maximum": 600, "default": 600},
                         "start_line": {"type": "integer", "minimum": 1},
                         "end_line": {"type": "integer", "minimum": 1},
                         "max_lines": {"type": "integer", "minimum": 1}
@@ -1948,7 +1948,7 @@ public class NativeMcpServer {
             }
 
             boolean showConstants = bool(args, "show_constants", true);
-            int timeout = intVal(args, "timeout", 30);
+            int timeout = intVal(args, "timeout", 600);
             Integer startLine = nullableInt(args, "start_line");
             Integer endLine = nullableInt(args, "end_line");
             Integer maxLines = nullableInt(args, "max_lines");

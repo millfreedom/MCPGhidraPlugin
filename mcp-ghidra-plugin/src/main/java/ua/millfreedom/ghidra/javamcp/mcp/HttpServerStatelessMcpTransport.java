@@ -29,7 +29,7 @@ import java.util.Map;
  */
 public class HttpServerStatelessMcpTransport implements McpStatelessServerTransport, HttpHandler {
 
-    private static final Duration DEFAULT_REQUEST_TIMEOUT = Duration.ofSeconds(60);
+    private static final Duration DEFAULT_REQUEST_TIMEOUT = Duration.ofSeconds(600);
 
     private final ObjectMapper objectMapper;
     private final Duration requestTimeout;

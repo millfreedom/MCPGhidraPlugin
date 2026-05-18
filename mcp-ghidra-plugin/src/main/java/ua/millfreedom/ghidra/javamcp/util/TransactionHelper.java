@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 public final class TransactionHelper {
 
-    private static final long DEFAULT_EDT_TIMEOUT_SECONDS = Long.getLong("ghidra.mcp.edt.timeout", 30L);
+    private static final long DEFAULT_EDT_TIMEOUT_SECONDS = Long.getLong("ghidra.mcp.edt.timeout", 600L);
     private static final ExecutorService EDT_EXECUTOR = Executors.newCachedThreadPool();
 
     private TransactionHelper() {
